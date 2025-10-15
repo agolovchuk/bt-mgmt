@@ -4,14 +4,12 @@ use zbus::Connection;
 use zvariant::Value;
 
 use super::nm_device::Nm;
-use crate::error::AppError;
+use crate::{error::AppError, network::nm_device::DevType};
 
 #[derive(Debug, Serialize)]
-struct IfaceInfo {
-    name: String,
-    iface_type: String,
-    state: String,
-    ip4: Option<String>,
+pub enum IfaceInfo {
+    Ethernet(String),
+    Wifi(String, String),
 }
 
 pub async fn collect_network_interface() -> Result<Vec<u8>, AppError> {
@@ -25,42 +23,26 @@ pub async fn collect_network_interface() -> Result<Vec<u8>, AppError> {
     };
 
     let nm = Nm::new(connection);
-    let mut result = Vec::<IfaceInfo>::new();
-    for dev_path in nm.get_devices().await? {
-        let device = nm.device(dev_path.as_str()).await?;
-        let active = device.active().await?;
-        if let Some(ipv4_config) = active.ipv4_conf().await {
-            result.push(IfaceInfo {
-                ip4: ipv4_config.ipv4().await,
-                name: device.interface().await.unwrap_or_default(),
-                iface_type: device
-                    .device_type()
-                    .await
-                    .map(Nm::map_device_type)
-                    .unwrap_or_default(),
-                state: device
-                    .state()
-                    .await
-                    .map(Nm::map_device_state)
-                    .unwrap_or_default(),
-            });
-        }
-    }
-    let b = serde_json::to_vec(&result).map_err(AppError::Serialize)?;
-    Ok(b)
-}
 
-// async fn extract_ipv4(conf: &zbus::Proxy<'_>) -> Option<String> {
-//     conf.get_property::<Vec<HashMap<String, Value>>>("AddressData")
-//         .await
-//         .ok()?
-//         .first()?
-//         .get("address")
-//         .and_then(|v| match v {
-//             Value::Str(addr) => Some(addr.to_string()),
-//             _ => None,
-//         })
-// }
+    let mut result = Vec::<IfaceInfo>::new();
+
+    for device in nm.get_devices().await? {
+        let dev_type = device.device_type().await?;
+        match dev_type.into() {
+            DevType::Ethernet => {
+                if let Some(ipv4_config) = device.active().await?.ipv4_conf().await {
+                    result.push(IfaceInfo::Ethernet(
+                        ipv4_config.ipv4().await.unwrap_or_default(),
+                    ));
+                }
+            }
+            DevType::WiFi => {}
+            _ => {}
+        };
+    }
+
+    serde_json::to_vec(&result).map_err(AppError::Serialize)
+}
 
 #[allow(dead_code)]
 async fn get_path(dev: &zbus::Proxy<'_>) -> Option<zbus::zvariant::OwnedObjectPath> {
@@ -68,7 +50,6 @@ async fn get_path(dev: &zbus::Proxy<'_>) -> Option<zbus::zvariant::OwnedObjectPa
         .get_property::<zbus::zvariant::OwnedObjectPath>("ActiveConnection")
         .await
         .ok()?;
-    // if active_conn_path.as_str() != "/" {}
     Some(active_conn_path)
 }
 
