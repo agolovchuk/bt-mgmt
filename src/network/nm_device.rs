@@ -31,23 +31,24 @@ pub struct Nm {
     pub conn: Connection,
 }
 pub struct NmDevice<'a> {
-    proxy: Proxy<'a>,
+    object_path: OwnedObjectPath,
     device: &'a Nm,
+}
+
+impl_nm_child!(NmDevice, NmIface::DEVICE);
+
+impl<'a> From<(OwnedObjectPath, &'a Nm)> for NmDevice<'a> {
+    fn from((object_path, device): (OwnedObjectPath, &'a Nm)) -> Self {
+        Self {
+            object_path,
+            device,
+        }
+    }
 }
 
 impl Nm {
     pub fn new(conn: Connection) -> Self {
         Self { conn }
-    }
-
-    pub fn map_device_type(device_type: u32) -> String {
-        match device_type {
-            1 => "Ethernet",
-            2 => "WiFi",
-            5 => "Bluetooth",
-            _ => "Other",
-        }
-        .to_string()
     }
 
     pub fn map_device_state(state: u32) -> String {
@@ -73,20 +74,20 @@ impl Nm {
         self.proxy(NmIface::MAIN_PATH, NmIface::CORE).await
     }
 
-    pub async fn get_devices(&self) -> Result<Vec<OwnedObjectPath>, AppError> {
-        self.main()
+    pub async fn get_devices<'a>(&'a self) -> Result<Vec<NmDevice<'a>>, AppError> {
+        let devs_path: Vec<OwnedObjectPath> = self
+            .main()
             .await?
             .call("GetDevices", &())
             .await
-            .map_err(AppError::NmError)
-    }
+            .map_err(AppError::NmError)?;
 
-    pub async fn device<'a>(&'a self, path: &'a str) -> Result<NmDevice<'a>, AppError> {
-        let proxy = self.proxy(path, NmIface::DEVICE).await?;
-        Ok(NmDevice {
-            proxy,
-            device: self,
-        })
+        let result = devs_path
+            .into_iter()
+            .map(|d| NmDevice::from((d, self)))
+            .collect::<Vec<_>>();
+
+        Ok(result)
     }
 
     pub async fn wifi<'a>(&'a self, path: &'a str) -> Result<NmWifi<'a>, AppError> {
@@ -100,20 +101,38 @@ impl Nm {
 
 impl<'a> NmDevice<'a> {
     pub async fn interface(&self) -> Option<String> {
-        self.proxy.get_property::<String>("Interface").await.ok()
+        self.to_proxy(self.device)
+            .await
+            .ok()?
+            .get_property::<String>("Interface")
+            .await
+            .ok()
     }
 
-    pub async fn device_type(&self) -> Option<u32> {
-        self.proxy.get_property::<u32>("DeviceType").await.ok()
+    pub async fn device_type(&self) -> Result<NmDeviceType, AppError> {
+        let device_type = self
+            .to_proxy(self.device)
+            .await?
+            .get_property::<u32>("DeviceType")
+            .await
+            .map_err(AppError::NmError)?;
+
+        Ok(NmDeviceType { device_type })
     }
 
     pub async fn state(&self) -> Option<u32> {
-        self.proxy.get_property::<u32>("State").await.ok()
+        self.to_proxy(self.device)
+            .await
+            .ok()?
+            .get_property::<u32>("State")
+            .await
+            .ok()
     }
 
     pub async fn active(&'a self) -> Result<NmActive<'a>, AppError> {
         let path = self
-            .proxy
+            .to_proxy(self.device)
+            .await?
             .get_property::<OwnedObjectPath>("ActiveConnection")
             .await
             .map_err(AppError::NmError)?;
@@ -122,6 +141,58 @@ impl<'a> NmDevice<'a> {
             object_path: path,
             device: self.device,
         })
+    }
+}
+
+#[derive(Copy, Clone)]
+pub struct NmDeviceType {
+    device_type: u32,
+}
+
+impl From<NmDeviceType> for DevType {
+    fn from(nm: NmDeviceType) -> DevType {
+        match nm.device_type {
+            1 => DevType::Ethernet,
+            2 => DevType::WiFi,
+            5 => DevType::Bluetooth,
+            _ => DevType::Other,
+        }
+    }
+}
+
+#[derive(PartialEq, Eq)]
+pub enum DevType {
+    Ethernet,
+    WiFi,
+    Bluetooth,
+    Other,
+}
+
+impl DevType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DevType::Ethernet => "Ethernet",
+            DevType::WiFi => "WiFi",
+            DevType::Bluetooth => "Bluetooth",
+            DevType::Other => "Other",
+        }
+    }
+}
+
+impl NmDeviceType {
+    fn to_dev_type(self) -> DevType {
+        DevType::from(self)
+    }
+    pub fn name(&self) -> &'static str {
+        self.to_dev_type().as_str()
+    }
+
+    pub fn is_wifi(&self) -> bool {
+        self.to_dev_type() == DevType::WiFi
+    }
+
+    pub fn is_ethernet(&self) -> bool {
+        self.to_dev_type() == DevType::Ethernet
     }
 }
 
