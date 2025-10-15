@@ -1,0 +1,20 @@
+[package]
+name = "ble-net-mngmt"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bluer = { version = "0.17.4", features = ["bluetoothd", "id"]}
+tokio = { version = "1.48", features = ["full"]}
+
+serde = { version = "1.0.228", features = ["derive"]}
+serde_json = { version = "1.0.145", features = ["std"]}
+dotenvy = "0.15.7"
+futures = "0.3.31"
+uuid = { version = "1.18.1", features = ["v4"]}
+zbus = "5.11.0"
+zvariant = "5.7.0"
+async-trait = "0.1.89"
+
+[profile.dev]
+debug = true
