@@ -24,7 +24,7 @@ impl NmIface {
 
     // --- Свойства / сигналы ---
     pub const PROPERTIES: &'static str = "org.freedesktop.DBus.Properties";
-    pub const WIRELESS_ACCESSPOINT: &'static str = "org.freedesktop.NetworkManager.AccessPoint";
+    pub const ACCESSPOINT: &'static str = "org.freedesktop.NetworkManager.AccessPoint";
 }
 
 pub struct Nm {
@@ -67,7 +67,7 @@ impl Nm {
     ) -> Result<Proxy<'a>, AppError> {
         Proxy::new(&self.conn, NmIface::CORE, path, interface)
             .await
-            .map_err(AppError::NmError)
+            .map_err(AppError::ZBusError)
     }
 
     pub async fn main<'a>(&self) -> Result<Proxy<'a>, AppError> {
@@ -80,7 +80,7 @@ impl Nm {
             .await?
             .call("GetDevices", &())
             .await
-            .map_err(AppError::NmError)?;
+            .map_err(AppError::ZBusError)?;
 
         let result = devs_path
             .into_iter()
@@ -90,52 +90,59 @@ impl Nm {
         Ok(result)
     }
 
-    pub async fn wifi<'a>(&'a self, path: &'a str) -> Result<NmWifi<'a>, AppError> {
-        let proxy = self.proxy(path, NmIface::DEVICE_WIRELESS).await?;
-        Ok(NmWifi {
-            proxy,
-            device: self,
-        })
-    }
+    // pub async fn wifi<'a>(&'a self, path: &'a str) -> Result<NmWifi<'a>, AppError> {
+    //     let proxy = self.proxy(path, NmIface::DEVICE_WIRELESS).await?;
+    //     Ok(NmWifi {
+    //         proxy,
+    //         device: self,
+    //     })
+    // }
 }
 
 impl<'a> NmDevice<'a> {
     pub async fn interface(&self) -> Option<String> {
-        self.to_proxy(self.device)
-            .await
-            .ok()?
-            .get_property::<String>("Interface")
+        self.get_property::<String>(self.device, "Interface")
             .await
             .ok()
     }
 
     pub async fn device_type(&self) -> Result<NmDeviceType, AppError> {
-        let device_type = self
-            .to_proxy(self.device)
-            .await?
-            .get_property::<u32>("DeviceType")
-            .await
-            .map_err(AppError::NmError)?;
+        let device_type = self.get_property::<u32>(self.device, "DeviceType").await?;
 
         Ok(NmDeviceType { device_type })
     }
 
     pub async fn state(&self) -> Option<u32> {
-        self.to_proxy(self.device)
+        self.get_property::<u32>(self.device, "State").await.ok()
+    }
+
+    pub async fn wireless(&'a self) -> Option<NmWifi<'a>> {
+        let proxy = self
+            .device
+            .proxy(self.path(), NmIface::DEVICE_WIRELESS)
             .await
-            .ok()?
-            .get_property::<u32>("State")
+            .ok()?;
+
+        let object_path = proxy
+            .get_property::<OwnedObjectPath>("ActiveAccessPoint")
             .await
-            .ok()
+            .map_err(AppError::ZBusError)
+            .ok()?;
+
+        if object_path.as_str() == "/" {
+            return None;
+        }
+
+        Some(NmWifi {
+            object_path,
+            device: self.device,
+        })
     }
 
     pub async fn active(&'a self) -> Result<NmActive<'a>, AppError> {
         let path = self
-            .to_proxy(self.device)
-            .await?
-            .get_property::<OwnedObjectPath>("ActiveConnection")
-            .await
-            .map_err(AppError::NmError)?;
+            .get_property::<OwnedObjectPath>(self.device, "ActiveConnection")
+            .await?;
 
         Ok(NmActive {
             object_path: path,
@@ -206,10 +213,7 @@ impl_nm_child!(NmActive, NmIface::ACTIVE_CONNECTION);
 impl<'a> NmActive<'a> {
     pub async fn ipv4_conf(&self) -> Option<NmAddress<'a>> {
         if self.object_path.as_str() != "/" {
-            self.to_proxy(self.device)
-                .await
-                .ok()?
-                .get_property::<OwnedObjectPath>("Ip4Config")
+            self.get_property::<OwnedObjectPath>(self.device, "Ip4Config")
                 .await
                 .ok()
                 .map(|object_path| NmAddress {
@@ -230,11 +234,8 @@ impl_nm_child!(NmAddress, NmIface::IP4_CONFIG);
 
 impl<'a> NmAddress<'a> {
     async fn address(&self) -> Result<Vec<HashMap<String, Value<'a>>>, AppError> {
-        self.to_proxy(self.device)
-            .await?
-            .get_property::<Vec<HashMap<String, Value>>>("AddressData")
+        self.get_property::<Vec<HashMap<String, Value>>>(self.device, "AddressData")
             .await
-            .map_err(AppError::NmError)
     }
 
     pub async fn ipv4(&self) -> Option<String> {
@@ -246,12 +247,24 @@ impl<'a> NmAddress<'a> {
     }
 }
 
-//==============
-
+impl_nm_child!(NmWifi, NmIface::ACCESSPOINT);
 pub struct NmWifi<'a> {
-    proxy: Proxy<'a>,
+    object_path: OwnedObjectPath,
     device: &'a Nm,
 }
+
+impl<'a> NmWifi<'a> {
+    pub async fn ssid(&self) -> Result<String, AppError> {
+        let ssid = self.get_property::<Vec<u8>>(self.device, "Ssid").await?;
+        Ok(String::from_utf8_lossy(&ssid).to_string())
+    }
+
+    pub async fn strength(&self) -> Result<u8, AppError> {
+        self.get_property::<u8>(self.device, "Strength").await
+    }
+}
+
+//==============
 
 pub struct NmWifiActiveAccessPoint {
     object_path: OwnedObjectPath,
@@ -260,28 +273,6 @@ pub struct NmWifiActiveAccessPoint {
 impl NmWifiActiveAccessPoint {
     pub fn path(&self) -> &str {
         self.object_path.as_str()
-    }
-}
-
-impl<'a> NmWifi<'a> {
-    pub async fn active_access_point(&self) -> Result<NmWifiActiveAccessPoint, AppError> {
-        let object_path = self
-            .proxy
-            .get_property::<OwnedObjectPath>("ActiveAccessPoint")
-            .await
-            .map_err(AppError::NmError)?;
-        Ok(NmWifiActiveAccessPoint { object_path })
-    }
-
-    pub async fn ap(
-        &self,
-        wifi_aap: &'a NmWifiActiveAccessPoint,
-    ) -> Result<NmAccessPoint<'a>, AppError> {
-        let proxy = self
-            .device
-            .proxy(wifi_aap.path(), NmIface::WIRELESS_ACCESSPOINT)
-            .await?;
-        Ok(NmAccessPoint { proxy })
     }
 }
 
@@ -294,13 +285,13 @@ impl<'a> NmAccessPoint<'a> {
         self.proxy
             .get_property::<Vec<u8>>("Ssid")
             .await
-            .map_err(AppError::NmError)
+            .map_err(AppError::ZBusError)
     }
 
     pub async fn strength(&self) -> Result<u8, AppError> {
         self.proxy
             .get_property::<u8>("Strength")
             .await
-            .map_err(AppError::NmError)
+            .map_err(AppError::ZBusError)
     }
 }

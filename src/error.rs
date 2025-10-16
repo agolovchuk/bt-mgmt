@@ -1,6 +1,8 @@
+#[derive(Debug)]
 pub enum AppError {
     Failed(String),
-    NmError(zbus::Error),
+    ZBusError(zbus::Error),
+    NmError(&'static str),
     Serialize(serde_json::Error),
 }
 
@@ -11,8 +13,12 @@ impl From<AppError> for bluer::gatt::local::ReqError {
                 println!("Failed: {}", message);
                 Self::Failed
             }
-            AppError::NmError(_) => Self::Failed,
+            AppError::ZBusError(_) => Self::Failed,
             AppError::Serialize(_) => Self::Failed,
+            AppError::NmError(message) => {
+                println!("NmError: {}", message);
+                Self::Failed
+            }
         }
     }
 }

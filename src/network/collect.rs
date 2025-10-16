@@ -8,8 +8,8 @@ use crate::{error::AppError, network::nm_device::DevType};
 
 #[derive(Debug, Serialize)]
 pub enum IfaceInfo {
-    Ethernet(String),
-    Wifi(String, String),
+    Ethernet(String, Option<String>),
+    Wifi(String, Option<String>, Option<u8>),
 }
 
 pub async fn collect_network_interface() -> Result<Vec<u8>, AppError> {
@@ -30,16 +30,31 @@ pub async fn collect_network_interface() -> Result<Vec<u8>, AppError> {
         let dev_type = device.device_type().await?;
         match dev_type.into() {
             DevType::Ethernet => {
-                if let Some(ipv4_config) = device.active().await?.ipv4_conf().await {
-                    result.push(IfaceInfo::Ethernet(
-                        ipv4_config.ipv4().await.unwrap_or_default(),
-                    ));
-                }
+                let ipv4 = match device.active().await?.ipv4_conf().await {
+                    Some(ipv4_config) => ipv4_config.ipv4().await,
+                    None => None,
+                };
+                result.push(IfaceInfo::Ethernet(
+                    device.interface().await.unwrap_or_default(),
+                    ipv4,
+                ));
             }
-            DevType::WiFi => {}
+            DevType::WiFi => {
+                let (ssid, strength) = match device.wireless().await {
+                    Some(ap) => (ap.ssid().await.ok(), ap.strength().await.ok()),
+                    None => (None, None),
+                };
+                result.push(IfaceInfo::Wifi(
+                    device.interface().await.unwrap_or_default(),
+                    ssid,
+                    strength,
+                ));
+            }
             _ => {}
         };
     }
+
+    // println!("Res :{:?}", result);
 
     serde_json::to_vec(&result).map_err(AppError::Serialize)
 }

@@ -1,5 +1,6 @@
 use async_trait::async_trait;
-use zbus::Proxy;
+use zbus::{Error, Proxy};
+use zvariant::OwnedValue;
 
 use super::nm_device::Nm;
 use crate::error::AppError;
@@ -12,6 +13,19 @@ pub trait NmChildObject<'a>: Sized {
 
     async fn to_proxy(&'a self, device: &'a Nm) -> Result<Proxy<'a>, AppError> {
         device.proxy(self.path(), Self::IFACE).await
+    }
+
+    async fn get_property<T>(&'a self, device: &'a Nm, name: &str) -> Result<T, AppError>
+    where
+        T: TryFrom<OwnedValue>,
+        T::Error: Into<Error>,
+    {
+        let proxy = self.to_proxy(device).await?;
+
+        proxy
+            .get_property::<T>(name)
+            .await
+            .map_err(AppError::ZBusError)
     }
 }
 
